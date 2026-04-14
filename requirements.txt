@@ -1,41 +1,25 @@
-# ════════════════════════════════════════════════════════════════
-# ApiTrack Pro v3.0 ULTIMATE — requirements.txt
-# Gestion apicole professionnelle · Python 3.10+
-# ════════════════════════════════════════════════════════════════
+# Core
+streamlit>=1.28.0
+pandas>=2.0.0
+numpy>=1.24.0
 
-# ── Core Framework ───────────────────────────────────────────────
-streamlit>=1.35.0
+# Graphiques & cartographie
+plotly>=5.17.0
+folium>=0.14.0
+streamlit-folium>=0.14.0
 
-# ── Data & Calcul ────────────────────────────────────────────────
-pandas>=2.2.0
-numpy>=1.26.0
+# IA & API
+anthropic>=0.18.0
 
-# ── Visualisation ────────────────────────────────────────────────
-plotly>=5.22.0
+# Photogrammétrie (détection pièce 10 DA)
+opencv-python>=4.8.0
 
-# ── Cartographie ─────────────────────────────────────────────────
-folium>=0.16.0
-streamlit-folium>=0.20.0
+# Optionnel – deep learning (TensorFlow)
+tensorflow>=2.13.0
 
-# ── Intelligence Artificielle ─────────────────────────────────────
-# Fournisseur principal (Claude)
-anthropic>=0.28.0
+# Optionnel – imagerie satellite (Sentinel Hub)
+sentinelhub>=3.9.0
 
-# ── Deep Learning (optionnel — Morphométrie avancée) ─────────────
-# Décommentez si vous souhaitez activer la classification TensorFlow
-# tensorflow>=2.15.0
-
-# ── Imagerie Satellitaire (optionnel — NDVI/SentinelHub) ─────────
-# Décommentez uniquement si vous avez un compte SentinelHub
-# sentinelhub>=3.9.0
-
-# ── Bibliothèques standard Python (incluses par défaut) ──────────
-# sqlite3   ← inclus dans Python standard
-# hashlib   ← inclus dans Python standard
-# json      ← inclus dans Python standard
-# base64    ← inclus dans Python standard
-# datetime  ← inclus dans Python standard
-# os        ← inclus dans Python standard
-# pathlib   ← inclus dans Python standard
-# urllib    ← inclus dans Python standard
-# re        ← inclus dans Python standard
+# Utilitaires
+pillow>=10.0.0   # gestion d'images par Streamlit
+requests>=2.31.0 # alternative à urllib (non obligatoire mais pratique)
