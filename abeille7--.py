@@ -1788,6 +1788,154 @@ def classify_race(aile, cubital, glossa):
     return {r: round(v / total * 100) for r, v in scores.items()}
 
 
+DIAMETRES_ETALONS = {
+    "Pièce 10 DA": 20.0,
+    "Pièce 1€":    23.25,
+    "Pièce 1$":    26.5,
+}
+
+
+def model_supporte_vision():
+    """Retourne True si le modèle actif supporte réellement la vision."""
+    prov = get_active_provider()
+    model = get_active_model()
+    cfg = IA_PROVIDERS.get(prov, {})
+    if not cfg.get("vision"):
+        return False
+    # Pour Google : seuls les modèles gemini-* supportent la vision, pas gemma-*
+    if cfg.get("type") == "google" and model.startswith("gemma"):
+        return False
+    return True
+
+
+def ia_mesurer_morphometrie_auto(image_bytes, etalon_type="Pièce 10 DA"):
+    """
+    Mensuration morphométrique par vision IA (Gemini, Claude, GPT-4o).
+    Retourne un dict JSON avec les mesures détectées sur la photo.
+    """
+    diametre_etalon_mm = DIAMETRES_ETALONS.get(etalon_type, 20.0)
+    prompt = f"""Tu es un expert en morphométrie apicole et en analyse d'images.
+Tu reçois une photo macro d'une abeille (Apis mellifera) placée à côté d'une pièce de monnaie étalon ({etalon_type}, diamètre réel = {diametre_etalon_mm} mm) pour calibration.
+
+Analyse l'image et mesure avec précision :
+1. Détecte la pièce étalon pour calibrer l'échelle pixels/mm
+2. Mesure les structures morphologiques de l'abeille
+
+Retourne UNIQUEMENT un objet JSON valide (sans balises markdown, sans texte avant ou après) :
+{{
+  "calibration_detectee": true,
+  "etalon_utilise": "{etalon_type}",
+  "longueur_aile_mm": 9.2,
+  "largeur_aile_mm": 3.1,
+  "indice_cubital": 2.3,
+  "glossa_mm": 6.1,
+  "tomentum": 2,
+  "pigmentation": "Brun foncé",
+  "confiance_mesure_pct": 85,
+  "notes_auto": "Courte description de ce que tu as observé sur la photo",
+  "avertissements": []
+}}
+
+Règles :
+- tomentum : entier entre 0 et 3
+- pigmentation : exactement l'une de ces valeurs : "Noir", "Brun foncé", "Brun clair", "Jaune"
+- Si tu ne peux pas mesurer un paramètre, garde la valeur typique d'Apis mellifera intermissa
+- confiance_mesure_pct : ton niveau de confiance global en %
+- avertissements : liste de messages si la photo est floue, étalon absent, etc.
+"""
+    return ia_call_json(prompt, image_bytes)
+
+
+def ia_estimer_morphometrie_texte(etalon_type, px_etalon, px_aile, px_largeur,
+                                   px_cubital_a, px_cubital_b, px_cubital_c,
+                                   px_glossa, tomentum, pigmentation):
+    """
+    Mode assisté sans vision : l'utilisateur mesure en pixels,
+    Gemma calcule les mm et estime les paramètres non mesurables.
+    """
+    diametre_mm = DIAMETRES_ETALONS.get(etalon_type, 20.0)
+    prompt = f"""Tu es un expert en morphométrie apicole (méthode Ruttner 1988).
+L'utilisateur a mesuré manuellement les structures de l'abeille en pixels sur une photo,
+en utilisant une {etalon_type} (diamètre réel = {diametre_mm} mm) comme étalon.
+
+Mesures en pixels :
+- Diamètre pièce étalon : {px_etalon} px  → 1 mm = {px_etalon}/{diametre_mm:.1f} px
+- Longueur aile antérieure : {px_aile} px
+- Largeur aile : {px_largeur} px
+- Nervures cubitales a : {px_cubital_a} px, b : {px_cubital_b} px, c : {px_cubital_c} px
+- Longueur glossa : {px_glossa} px
+- Tomentum observé : {tomentum}/3
+- Pigmentation scutellum : {pigmentation}
+
+Calcule et retourne UNIQUEMENT un objet JSON valide :
+{{
+  "calibration_detectee": true,
+  "etalon_utilise": "{etalon_type}",
+  "echelle_px_par_mm": {round(px_etalon/diametre_mm, 4) if px_etalon > 0 else 0},
+  "longueur_aile_mm": 0.0,
+  "largeur_aile_mm": 0.0,
+  "indice_cubital": 0.0,
+  "glossa_mm": 0.0,
+  "tomentum": {tomentum},
+  "pigmentation": "{pigmentation}",
+  "confiance_mesure_pct": 90,
+  "notes_auto": "Mensuration assistée — calcul Gemma depuis mesures en pixels",
+  "avertissements": []
+}}
+
+Formules de calcul :
+- echelle = px_etalon / {diametre_mm}  (px par mm)
+- longueur_aile_mm = px_aile / echelle
+- largeur_aile_mm = px_largeur / echelle
+- indice_cubital = (px_cubital_a / px_cubital_b) / (px_cubital_b / px_cubital_c) si px_cubital_b > 0 et px_cubital_c > 0, sinon 2.3
+- glossa_mm = px_glossa / echelle
+Arrondis à 2 décimales. Si px = 0, utilise valeurs typiques d'A.m. intermissa.
+"""
+    return ia_call_json(prompt)
+
+
+def _appliquer_mesures_auto(result):
+    """Injecte les mesures IA dans session_state et affiche le résultat."""
+    if "error" in result:
+        st.error(f"❌ Erreur mensuration IA : {result['error']}")
+        return
+    pig_valid = ["Noir", "Brun foncé", "Brun clair", "Jaune"]
+    pig_raw   = result.get("pigmentation", "Brun foncé")
+    st.session_state["morpho_aile"]         = float(result.get("longueur_aile_mm", 9.2))
+    st.session_state["morpho_largeur"]      = float(result.get("largeur_aile_mm", 3.1))
+    st.session_state["morpho_cubital"]      = float(result.get("indice_cubital", 2.3))
+    st.session_state["morpho_glossa"]       = float(result.get("glossa_mm", 6.1))
+    st.session_state["morpho_tomentum"]     = int(result.get("tomentum", 2))
+    st.session_state["morpho_pigmentation"] = pig_raw if pig_raw in pig_valid else "Brun foncé"
+    st.session_state["morpho_notes_auto"]   = result.get("notes_auto", "Mensuration assistée")
+    confiance_auto  = result.get("confiance_mesure_pct", 0)
+    avertissements  = result.get("avertissements", [])
+
+    st.success(f"✅ Mensuration terminée — confiance IA : **{confiance_auto}%**")
+    for av in avertissements:
+        st.warning(f"⚠️ {av}")
+
+    st.markdown("#### 📐 Mesures calculées")
+    col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+    col_r1.metric("Aile ant. (mm)", f"{st.session_state['morpho_aile']:.2f}")
+    col_r2.metric("Largeur aile (mm)", f"{st.session_state['morpho_largeur']:.2f}")
+    col_r3.metric("Indice cubital", f"{st.session_state['morpho_cubital']:.2f}")
+    col_r4.metric("Glossa (mm)", f"{st.session_state['morpho_glossa']:.2f}")
+    col_r5, col_r6, _ = st.columns(3)
+    col_r5.metric("Tomentum", st.session_state["morpho_tomentum"])
+    col_r6.metric("Pigmentation", st.session_state["morpho_pigmentation"])
+
+    if st.session_state["morpho_notes_auto"]:
+        st.markdown(
+            f"<div style='background:#0F1117;border-left:3px solid #C8820A;padding:8px 12px;"
+            f"border-radius:4px;font-size:.85rem;color:#A8B4CC;margin-top:8px'>"
+            f"🔍 <i>{st.session_state['morpho_notes_auto']}</i></div>",
+            unsafe_allow_html=True
+        )
+    st.info("➡️ Mesures reportées dans **🔬 Analyse + IA** — vérifiez et lancez l'analyse complète.")
+    log_action("Morphométrie Auto", f"Mensuration — confiance {confiance_auto}%")
+
+
 def page_morpho():
     st.markdown("## 🧬 Morphométrie IA — Classification raciale")
     st.markdown("<p style='color:#A8B4CC'>Mesures morphométriques + analyse IA multi-fournisseurs (Ruttner 1988)</p>",
@@ -1807,23 +1955,198 @@ def page_morpho():
         "hybride": ["Variable selon parentaux", "Évaluation approfondie requise"],
     }
 
-    tab1, tab2 = st.tabs(["🔬 Analyse + IA", "📜 Historique"])
+    # Initialiser les valeurs de session pour la mensuration auto
+    for k, v in [("morpho_aile", 9.2), ("morpho_largeur", 3.1), ("morpho_cubital", 2.3),
+                 ("morpho_glossa", 6.1), ("morpho_tomentum", 2),
+                 ("morpho_pigmentation", "Brun foncé"), ("morpho_notes_auto", "")]:
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    tab0, tab1, tab2 = st.tabs(["🤖 Mensuration Auto IA", "🔬 Analyse + IA", "📜 Historique"])
+
+    # ── ONGLET 0 : MENSURATION AUTOMATIQUE ────────────────────────────────────
+    with tab0:
+        st.markdown("### 📷 Mensuration morphométrique automatique par IA")
+
+        prov_now  = get_active_provider()
+        model_now = get_active_model()
+        vision_ok = model_supporte_vision()
+
+        if vision_ok:
+            st.markdown(
+                f"<div style='background:#0F2B1A;border:1px solid #34D399;border-left:4px solid #34D399;"
+                f"border-radius:6px;padding:8px 14px;margin-bottom:10px;font-size:.83rem;color:#34D399'>"
+                f"✅ <b>Mode Vision activé</b> — {prov_now} / {model_now} analyse directement la photo.</div>",
+                unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                f"<div style='background:#1A1A0A;border:1px solid #F5A623;border-left:4px solid #F5A623;"
+                f"border-radius:6px;padding:8px 14px;margin-bottom:10px;font-size:.83rem;color:#F5A623'>"
+                f"🔢 <b>Mode Assisté activé</b> — {model_now} (sans vision). "
+                f"Mesurez les structures en pixels sur la photo, Gemma calcule les mm.</div>",
+                unsafe_allow_html=True
+            )
+
+        # ── Sélection étalon (commun aux deux modes) ──
+        col_e1, col_e2 = st.columns([1, 2])
+        with col_e1:
+            etalon_type = st.selectbox(
+                "🪙 Pièce étalon",
+                list(DIAMETRES_ETALONS.keys()),
+                index=0,
+                help="Placez cette pièce à côté de l'abeille sur la photo."
+            )
+            st.markdown(
+                f"<small style='color:#F5A623'>Diamètre réel : <b>{DIAMETRES_ETALONS[etalon_type]} mm</b></small>",
+                unsafe_allow_html=True
+            )
+        with col_e2:
+            st.markdown(
+                """<div style='background:#0F1117;border:1px solid #3A4A66;border-radius:8px;
+                padding:8px 12px;font-size:.81rem;color:#A8B4CC'>
+                <b style='color:#F5A623'>💡 Conseils photo :</b>
+                Éclairage uniforme · Abeille aplatie · Aile bien dépliée ·
+                Pièce dans le même plan · Résolution ≥ 1 MP
+                </div>""",
+                unsafe_allow_html=True
+            )
+
+        img_auto = st.file_uploader(
+            "📷 Photo macro abeille + pièce étalon",
+            type=["jpg", "jpeg", "png", "webp"],
+            key="morpho_auto_img"
+        )
+
+        if img_auto:
+            st.image(img_auto, caption="Photo chargée", use_column_width=True)
+
+        # ════════════════════════════════════════════════
+        # MODE A : VISION (Gemini-2.0-flash, Claude, etc.)
+        # ════════════════════════════════════════════════
+        if vision_ok:
+            btn_auto = st.button(
+                "🔬 Lancer la mensuration automatique par IA",
+                disabled=(not ia_active or img_auto is None),
+                use_container_width=True,
+                type="primary"
+            )
+            if not ia_active:
+                st.info("🔑 Configurez votre clé API IA.")
+            elif img_auto is None:
+                st.info("⬆️ Chargez une photo pour lancer la mensuration.")
+
+            if btn_auto and img_auto and ia_active:
+                img_bytes = img_auto.read()
+                with st.spinner(f"🤖 {model_now} analyse la photo et mesure les structures..."):
+                    result = ia_mesurer_morphometrie_auto(img_bytes, etalon_type)
+                _appliquer_mesures_auto(result)
+
+        # ════════════════════════════════════════════════
+        # MODE B : ASSISTÉ SANS VISION (Gemma, Groq, etc.)
+        # ════════════════════════════════════════════════
+        else:
+            st.markdown("---")
+            st.markdown(
+                "#### 📏 Mesurez les structures en pixels sur votre photo\n"
+                "<small style='color:#A8B4CC'>Utilisez un logiciel comme "
+                "<b>ImageJ</b>, <b>GIMP</b> ou l'outil de mesure de votre téléphone. "
+                "Mesurez la pièce étalon d'abord pour calibrer, puis chaque structure.</small>",
+                unsafe_allow_html=True
+            )
+
+            col_px1, col_px2 = st.columns(2)
+            with col_px1:
+                px_etalon   = st.number_input(f"📏 Diamètre {etalon_type} (px)", 10, 5000, 400, 1,
+                                               help="Mesurez le diamètre de la pièce en pixels")
+                px_aile     = st.number_input("📏 Longueur aile antérieure (px)", 0, 5000, 0, 1)
+                px_largeur  = st.number_input("📏 Largeur aile (px)", 0, 5000, 0, 1)
+                px_glossa   = st.number_input("📏 Longueur glossa (px)", 0, 5000, 0, 1)
+
+            with col_px2:
+                st.markdown(
+                    "<small style='color:#A8B4CC'><b>Indice cubital :</b> "
+                    "mesurez les 3 segments de nervure a, b, c</small>",
+                    unsafe_allow_html=True
+                )
+                px_cubital_a = st.number_input("📏 Nervure cubitale a (px)", 0, 2000, 0, 1)
+                px_cubital_b = st.number_input("📏 Nervure cubitale b (px)", 0, 2000, 0, 1)
+                px_cubital_c = st.number_input("📏 Nervure cubitale c (px)", 0, 2000, 0, 1)
+
+                # Observation directe (pas besoin de vision)
+                tomentum_obs    = st.slider("👁️ Tomentum observé (0–3)", 0, 3, 2)
+                pig_opts        = ["Noir", "Brun foncé", "Brun clair", "Jaune"]
+                pigmentation_obs = st.selectbox("👁️ Pigmentation scutellum", pig_opts, index=1)
+
+            # Afficher l'échelle calculée en temps réel
+            if px_etalon > 0:
+                echelle = px_etalon / DIAMETRES_ETALONS[etalon_type]
+                st.markdown(
+                    f"<div style='background:#0F1117;border:1px solid #3A4A66;border-radius:6px;"
+                    f"padding:6px 12px;font-size:.82rem;color:#A8B4CC;margin-top:4px'>"
+                    f"📐 Échelle calculée : <b style='color:#F5A623'>{echelle:.1f} px/mm</b> "
+                    f"({'%.1f' % (px_aile/echelle)} mm aile · "
+                    f"{'%.1f' % (px_glossa/echelle) if px_glossa>0 else '—'} mm glossa)</div>",
+                    unsafe_allow_html=True
+                )
+
+            btn_calc = st.button(
+                "🧮 Calculer les mesures avec Gemma",
+                disabled=(not ia_active or px_etalon == 0),
+                use_container_width=True,
+                type="primary"
+            )
+            if not ia_active:
+                st.info("🔑 Configurez votre clé API IA.")
+            elif px_etalon == 0:
+                st.info("⬆️ Saisissez au moins le diamètre de la pièce étalon en pixels.")
+
+            if btn_calc and ia_active and px_etalon > 0:
+                with st.spinner(f"🧮 {model_now} calcule et estime les mesures morphométriques..."):
+                    result = ia_estimer_morphometrie_texte(
+                        etalon_type, px_etalon, px_aile, px_largeur,
+                        px_cubital_a, px_cubital_b, px_cubital_c,
+                        px_glossa, tomentum_obs, pigmentation_obs
+                    )
+                _appliquer_mesures_auto(result)
 
     with tab1:
+        # Indicateur si les mesures viennent de la mensuration auto
+        _auto_filled = st.session_state.get("morpho_notes_auto", "") != ""
+        if _auto_filled:
+            st.markdown(
+                "<div style='background:#0F1117;border:1px solid #34D399;border-left:4px solid #34D399;"
+                "border-radius:6px;padding:8px 14px;margin-bottom:10px;font-size:.85rem;color:#34D399'>"
+                "✅ <b>Mesures pré-remplies par mensuration automatique IA</b> — vérifiez et ajustez si nécessaire.</div>",
+                unsafe_allow_html=True
+            )
+
         col1, col2 = st.columns([1, 1.2])
 
         with col1:
             st.markdown("### 📐 Mesures morphométriques")
             ruche_sel = st.selectbox("Ruche analysée", opts.keys())
-            aile    = st.number_input("Longueur aile antérieure (mm)", 7.0, 12.0, 9.2, 0.1)
-            largeur = st.number_input("Largeur aile (mm)", 2.0, 5.0, 3.1, 0.1)
-            cubital = st.number_input("Indice cubital", 1.0, 5.0, 2.3, 0.1,
+
+            # Clamp values to valid range before using as default
+            _aile_def    = max(7.0, min(12.0, float(st.session_state.get("morpho_aile", 9.2))))
+            _largeur_def = max(2.0, min(5.0,  float(st.session_state.get("morpho_largeur", 3.1))))
+            _cubital_def = max(1.0, min(5.0,  float(st.session_state.get("morpho_cubital", 2.3))))
+            _glossa_def  = max(4.0, min(8.0,  float(st.session_state.get("morpho_glossa", 6.1))))
+            _tom_def     = max(0,   min(3,    int(st.session_state.get("morpho_tomentum", 2))))
+            _pig_opts    = ["Noir", "Brun foncé", "Brun clair", "Jaune"]
+            _pig_def     = st.session_state.get("morpho_pigmentation", "Brun foncé")
+            _pig_idx     = _pig_opts.index(_pig_def) if _pig_def in _pig_opts else 1
+
+            aile    = st.number_input("Longueur aile antérieure (mm)", 7.0, 12.0, _aile_def, 0.1)
+            largeur = st.number_input("Largeur aile (mm)", 2.0, 5.0, _largeur_def, 0.1)
+            cubital = st.number_input("Indice cubital", 1.0, 5.0, _cubital_def, 0.1,
                                       help="Rapport distances nervures cubitales a/b ÷ b/c")
-            glossa  = st.number_input("Longueur glossa (mm)", 4.0, 8.0, 6.1, 0.1)
-            tomentum    = st.slider("Tomentum (densité poils thorax 0–3)", 0, 3, 2)
-            pigmentation = st.selectbox("Pigmentation scutellum",
-                                        ["Noir", "Brun foncé", "Brun clair", "Jaune"])
-            notes = st.text_area("Notes / Observations")
+            glossa  = st.number_input("Longueur glossa (mm)", 4.0, 8.0, _glossa_def, 0.1)
+            tomentum    = st.slider("Tomentum (densité poils thorax 0–3)", 0, 3, _tom_def)
+            pigmentation = st.selectbox("Pigmentation scutellum", _pig_opts, index=_pig_idx)
+            _notes_auto = st.session_state.get("morpho_notes_auto", "")
+            notes = st.text_area("Notes / Observations",
+                                 value=f"[Mensuration auto IA] {_notes_auto}" if _notes_auto else "")
 
             st.markdown("### 📷 Photo macro (optionnel)")
             st.markdown("<small style='color:#A8B4CC'>Photo macro de l'aile ou de l'abeille (si le fournisseur IA supporte la vision)</small>",
